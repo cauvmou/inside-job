@@ -9,4 +9,5 @@ edition = "2021"
 actix-web= { version="^4", features=["openssl"]}
 openssl = { version = "0.10" }
 uuid = { version="^1", features=["v4", "fast-rng", "macro-diagnostics"]}
-lazy_static="^1.4"
+lazy_static = "^1.4"
+reedline="^0.14"
