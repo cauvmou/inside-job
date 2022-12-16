@@ -1,8 +1,9 @@
-use std::{time::SystemTime, borrow::Cow};
+use std::{time::SystemTime, borrow::Cow, net::Ipv4Addr, str::FromStr};
+use clipboard::{ClipboardProvider, ClipboardContext};
 use reedline::{Reedline, Signal, PromptEditMode, Prompt, PromptHistorySearchStatus, PromptViMode};
 use uuid::Uuid;
-
-use crate::{APPLICATION};
+use pnet::{datalink::{self, NetworkInterface}, ipnetwork::IpNetwork};
+use crate::{APPLICATION, payload::{generate_payload, PayloadType}};
 
 static LOGO: &'static str = "
             ┌───┐
@@ -88,6 +89,46 @@ fn console(session_uuid: &mut Option<Uuid>) {
                             println!("No UUID supplied.");
                         }
                     },
+                    "payload" => {
+                        if command.len() >= 2 {
+                            if let Ok(addr) = Ipv4Addr::from_str(command[1]) {
+                                let mut clipboard: ClipboardContext = ClipboardProvider::new().unwrap();
+                                let payload: String;
+                                if *command.get(2).unwrap_or(&"") == "-s" {
+                                    payload = generate_payload(PayloadType::SECURE, addr);
+                                } else {
+                                    payload = generate_payload(PayloadType::UNSECURE, addr);
+                                }
+                                println!("{payload}");
+                                match clipboard.set_contents(payload) {
+                                    Ok(_) => println!("Copied to clipboard."),
+                                    Err(_) => println!("Failed to copy to clipboard."),
+                                }
+                            } else {
+                                let all = datalink::interfaces();
+                                let interfaces = all.iter().filter(|i| i.name == command[1]).collect::<Vec<&NetworkInterface>>();
+                                if interfaces.len() > 0 {
+                                    let ip = interfaces[0].ips.iter().filter(|ip| ip.is_ipv4()).collect::<Vec<&IpNetwork>>();
+                                    if ip.len() > 0 {
+                                        if let Ok(addr) = Ipv4Addr::from_str(&ip[0].ip().to_string()) {
+                                            let mut clipboard: ClipboardContext = ClipboardProvider::new().unwrap();
+                                            let payload: String;
+                                            if *command.get(2).unwrap_or(&"") == "-s" {
+                                                payload = generate_payload(PayloadType::SECURE, addr);
+                                            } else {
+                                                payload = generate_payload(PayloadType::UNSECURE, addr);
+                                            }
+                                            println!("{payload}");
+                                            match clipboard.set_contents(payload) {
+                                                Ok(_) => println!("Copied to clipboard."),
+                                                Err(_) => println!("Failed to copy to clipboard."),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "exit" => {
                         std::process::exit(0)
                     }
@@ -122,7 +163,7 @@ fn remote(session_uuid: &mut Option<Uuid>) {
                             let session = app.sessions.get_mut(&uuid).unwrap();
                             session.current_input = (buffer, true);
                         }
-                        std::thread::sleep(std::time::Duration::from_secs_f64(0.5));
+                        std::thread::sleep(std::time::Duration::from_secs_f64(1.0));
                     }
                 }
             },

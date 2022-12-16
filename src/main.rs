@@ -2,6 +2,8 @@ use std::{collections::HashMap, sync::{Mutex, Arc}, time::SystemTime, thread};
 use actix_web::{HttpServer, App, web::{self, Bytes}, Responder, get, post, HttpResponseBuilder, http::StatusCode, HttpRequest};
 use lazy_static::lazy_static;
 use openssl::ssl::{SslAcceptor, SslMethod, SslFiletype};
+use docopt::Docopt;
+use serde::Deserialize;
 use uuid::Uuid;
 use cli::Session;
 
@@ -12,13 +14,39 @@ lazy_static! {
     static ref APPLICATION: Arc<Mutex<Application>> = Arc::new(Mutex::new(Application::default()));
 }
 
+const USAGE: &'static str = "
+inside-job
+
+Usage: 
+    inside-job [-a ADDRESS] [-p PORT]
+    inside-job [-a ADDRESS] [-p PORT] --key PATH --cert PATH
+    inside-job (-h | --help)
+
+Options:
+    -h, --help                      Show this screen.
+    -a ADDRESS, --address ADDRESS   Define the address [default: 0.0.0.0].
+    -p PORT, --port PORT            Define the port for the web server [default: 8080].
+    --key PATH                      Add TLS key in PEM format.
+    --cert PATH                     Add TLS cert in PEM format.
+";
+
+#[derive(Debug, Deserialize)]
+pub struct Option {
+    flag_address: String,
+    flag_port: usize,
+    flag_key: String,
+    flag_cert: String
+}
+
 pub struct Application {
-    pub sessions: HashMap<Uuid, Session>
+    pub sessions: HashMap<Uuid, Session>,
+    pub secure: bool,
+    pub port: usize,
 }
 
 impl Default for Application {
     fn default() -> Self {
-        Self { sessions: HashMap::new() }
+        Self { sessions: HashMap::new(), secure: false, port: 8080 }
     }
 }
 
@@ -86,21 +114,35 @@ async fn cmd_output(path: web::Path<(String,),>, bytes: Bytes, req: HttpRequest)
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let _handle_cli = thread::spawn(move || cli::cli());
-    let _handle_hearth_beat = thread::spawn(move || hearth_beat());
-    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
-    builder
-        .set_private_key_file("key.pem", SslFiletype::PEM)
-        .unwrap();
-    builder.set_certificate_chain_file("cert.pem").unwrap();
-    HttpServer::new(|| {
+    let args: Option = Docopt::new(USAGE)
+        .and_then(|d| d.deserialize())
+        .unwrap_or_else(|e| e.exit());
+
+    let secure = args.flag_cert.len() > 0 && args.flag_key.len() > 0;
+    if let Ok(mut app) = APPLICATION.lock() {
+        app.secure = secure;
+        app.port = args.flag_port;
+    }
+    
+    let mut server = HttpServer::new(|| {
         App::new()
         .service(index)
         .service(cmd_input)
         .service(cmd_output)
-    })
-    .bind_openssl("0.0.0.0:8080", builder)?
-    //.bind(("0.0.0.0", 8080))?
+    });
+    if secure {
+        let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+        builder
+            .set_private_key_file(args.flag_key, SslFiletype::PEM)
+            .unwrap();
+        builder.set_certificate_chain_file(args.flag_cert).unwrap();
+        server = server.bind_openssl(format!("{}:{}", args.flag_address, args.flag_port), builder)?;
+    } else {
+        server = server.bind(format!("{}:{}", args.flag_address, args.flag_port))?;
+    }
+    let _handle_cli = thread::spawn(move || cli::cli());
+    let _handle_hearth_beat = thread::spawn(move || hearth_beat());
+    server
     .run()
     .await
 }

@@ -10,4 +10,8 @@ actix-web= { version="^4", features=["openssl"]}
 openssl = { version = "0.10" }
 uuid = { version="^1", features=["v4", "fast-rng", "macro-diagnostics"]}
 lazy_static = "^1.4"
-reedline="^0.14"
+reedline = "^0.14"
+docopt = "1"
+serde = { version = "1", features = ["derive"] }
+clipboard = "^0.5"
+pnet = { version= " ^0.31", features = ["std"] }
