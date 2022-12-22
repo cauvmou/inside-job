@@ -92,18 +92,16 @@ async fn cmd_output(path: web::Path<(String,),>, bytes: Bytes, req: HttpRequest)
         if let Ok(uuid) = Uuid::parse_str(path.0.as_str()) {
             if let Some(session) = data.sessions.get_mut(&uuid) {
                 if let Ok(body) = String::from_utf8(bytes.to_vec()) {
-                    if let Ok(body) = String::from_utf8(body.split(" ").map(|s| u8::from_str_radix(s, 10).unwrap_or(0)).collect::<Vec<u8>>()) {
-                        println!("{body}");
-                        if let Some(dir) = req.headers().get("x-Dir") {
-                            session.pwd = dir.to_str().expect("Failed to parse directory string.").to_string()
-                        }
-                        if let Some(user) = req.headers().get("x-User") {
-                            session.user = user.to_str().expect("Failed to parse user string.").to_string()
-                        }
-                        session.output_history.push((body, SystemTime::now()));
-                        session.last_interaction = SystemTime::now();
-                        return HttpResponseBuilder::new(StatusCode::ACCEPTED)
+                    println!("{body}");
+                    if let Some(dir) = req.headers().get("x-Dir") {
+                        session.pwd = dir.to_str().expect("Failed to parse directory string.").to_string()
                     }
+                    if let Some(user) = req.headers().get("x-User") {
+                        session.user = user.to_str().expect("Failed to parse user string.").to_string()
+                    }
+                    session.output_history.push((body, SystemTime::now()));
+                    session.last_interaction = SystemTime::now();
+                    return HttpResponseBuilder::new(StatusCode::ACCEPTED)
                 }
                 return HttpResponseBuilder::new(StatusCode::BAD_REQUEST)
             }       
