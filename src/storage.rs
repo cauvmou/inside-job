@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, LockResult, RwLock};
 use serde::{Deserialize, Serialize};
-use crate::session::{Command, Session};
+use crate::session::{Command, Session, SessionData};
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct SessionStore {
@@ -59,6 +59,13 @@ impl SessionStore {
         let commands = self.commands.get(&uuid).ok_or("No session for uuid!".to_string())?;
         let mut commands = commands.write().ok().ok_or("Cannot acquire commands lock!".to_string())?;
         commands.push(command);
+        Ok(())
+    }
+    
+    pub fn update_session_data(&self, uuid: u128, data: SessionData) -> Result<(), String> {
+        let session = self.sessions.get(&uuid).ok_or("No session for uuid!".to_string())?;
+        let mut session = session.write().ok().ok_or("Cannot acquire session!".to_string())?;
+        session.data = data;
         Ok(())
     }
 }

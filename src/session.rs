@@ -25,7 +25,7 @@ pub struct Session {
     pub uuid: u128,
     pub last_seen: std::time::SystemTime,
     pub status: Status,
-    pub metadata: SessionData,
+    pub data: SessionData,
 }
 
 impl PartialOrd for Session {

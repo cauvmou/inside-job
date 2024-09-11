@@ -7,7 +7,7 @@ use std::string::FromUtf8Error;
 use std::sync::{LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use clap::Parser;
 use log::{error, info, trace, warn};
-use crate::session::{Command, Session};
+use crate::session::{Command, Session, SessionData};
 use crate::storage::SessionStore;
 
 static LOGO: &'static str = "
@@ -59,7 +59,7 @@ async fn index(req: actix_web::HttpRequest, session_store: actix_web::web::Data<
                         uuid: uuid.as_u128(),
                         last_seen: std::time::SystemTime::now(),
                         status: session::Status::Active,
-                        metadata: session::SessionData {
+                        data: session::SessionData {
                             user,
                             directory,
                         },
@@ -115,11 +115,18 @@ async fn cmd_output(path: actix_web::web::Path<(String,), >, bytes: actix_web::w
             };
             let command = match store.resolve_command(uuid.as_u128(), output) {
                 Ok(command) => command,
-                Err(err) => return actix_web::HttpResponse::InternalServerError().body(format!("{err}").to_string())
+                Err(err) => return actix_web::HttpResponse::InternalServerError().body(err.to_string().to_string())
             };
+            match store.update_session_data(uuid.as_u128(), SessionData {
+                user,
+                directory,
+            }) {
+                Ok(_) => {}
+                Err(err) => return actix_web::HttpResponse::InternalServerError().body(err.to_string().to_string())
+            }
             return match store.insert_command(uuid.as_u128(), command) {
                 Ok(_) => actix_web::HttpResponse::Ok().finish(),
-                Err(err) => actix_web::HttpResponse::InternalServerError().body(format!("{err}").to_string())
+                Err(err) => actix_web::HttpResponse::InternalServerError().body(err.to_string().to_string())
             };
         }
     }
@@ -133,9 +140,8 @@ async fn main() -> std::io::Result<()> {
         .with_level(log::LevelFilter::Warn)
         .with_module_level("insidejob", log::LevelFilter::Info)
         .init().expect("Failed to start logger!");
-    println!("{LOGO}");
 
-    let mut server = actix_web::HttpServer::new(|| {
+    let server = actix_web::HttpServer::new(|| {
         actix_web::App::new()
             .app_data(actix_web::web::Data::new(RwLock::new(SessionStore::default())))
             .service(index)
@@ -146,7 +152,7 @@ async fn main() -> std::io::Result<()> {
     let server_binding = if let (Some(key), Some(cert)) = (args.key, args.cert) {
         info!("using TLS key from {key:?}, and cert from {cert:?}...");
         let mut builder = openssl::ssl::SslAcceptor::mozilla_intermediate(openssl::ssl::SslMethod::tls()).unwrap();
-        builder.set_private_key_file(key, openssl::ssl::SslFiletype::PEM).unwrap();
+        builder.set_private_key_file(key, openssl::ssl::SslFiletype::PEM)?;
         builder.set_certificate_chain_file(cert)?;
         server.bind_openssl((args.address, args.port), builder)
     } else {
