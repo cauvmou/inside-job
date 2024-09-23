@@ -1,10 +1,12 @@
 mod session;
 mod storage;
+mod cli;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::string::FromUtf8Error;
-use std::sync::{LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::thread::spawn;
 use clap::Parser;
 use log::{error, info, trace, warn};
 use crate::session::{Command, Session, SessionData};
@@ -69,7 +71,7 @@ async fn index(req: actix_web::HttpRequest, session_store: actix_web::web::Data<
                 Err(_) => {
                     actix_web::HttpResponse::InternalServerError().body("Failed to acquire session store lock!".to_string())
                 }
-            }
+            };
         }
     }
     actix_web::HttpResponse::BadRequest().finish()
@@ -89,7 +91,7 @@ async fn cmd_input(path: actix_web::web::Path<(String,)>, req: actix_web::HttpRe
             return match store.get_pending_command(uuid.as_u128()) {
                 Ok(command) => actix_web::HttpResponse::Ok().body(command),
                 Err(err) => actix_web::HttpResponse::InternalServerError().body(err),
-            }
+            };
         }
     }
     actix_web::HttpResponse::BadRequest().finish()
@@ -141,13 +143,18 @@ async fn main() -> std::io::Result<()> {
         .with_module_level("insidejob", log::LevelFilter::Info)
         .init().expect("Failed to start logger!");
 
-    let server = actix_web::HttpServer::new(|| {
-        actix_web::App::new()
-            .app_data(actix_web::web::Data::new(RwLock::new(SessionStore::default())))
-            .service(index)
-            .service(cmd_input)
-            .service(cmd_output)
-    });
+    let session_store = Arc::new(RwLock::new(SessionStore::default()));
+
+    let server = {
+        let session_store = session_store.clone();
+        actix_web::HttpServer::new(move || {
+            actix_web::App::new()
+                .app_data(actix_web::web::Data::new(session_store.clone()))
+                .service(index)
+                .service(cmd_input)
+                .service(cmd_output)
+        })
+    };
 
     let server_binding = if let (Some(key), Some(cert)) = (args.key, args.cert) {
         info!("using TLS key from {key:?}, and cert from {cert:?}...");
@@ -163,6 +170,11 @@ async fn main() -> std::io::Result<()> {
     match server_binding {
         Ok(server) => {
             server.addrs_with_scheme().iter().for_each(|(addr, scheme)| info!("listening on: {scheme}://{addr}"));
+            let cli_handle = {
+                let session_store = session_store.clone();
+                spawn(|| cli::run(session_store))
+            };
+            cli_handle.join().unwrap();
             server.run().await?;
         }
         Err(err) => {
