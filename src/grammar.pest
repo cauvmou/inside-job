@@ -1,0 +1,16 @@
+WHITESPACE = _{ " " | "\t" }
+
+uuid = @{uuid_char{8} ~ "-" ~ uuid_char{4} ~ "-" ~ uuid_char{4} ~ "-" ~ uuid_char{4} ~ "-" ~ uuid_char{12}}
+    uuid_char = _{(ASCII_ALPHA_LOWER | ASCII_DIGIT)}
+
+alias = @{"$" ~ alias_char+}
+    alias_char = @{ASCII_ALPHA | "-" | "_"}
+
+session_command = {"session" ~ (op_show | op)}
+    object = {uuid | alias}
+    op = _{object ~ (op_show | op_alias | op_open)}
+    op_show = {"show" | "sh"}
+    op_alias = {("alias" | ">") ~ alias}
+    op_open = {"open" | "op" | "."}
+
+command = _{ SOI ~ session_command ~ EOI }
