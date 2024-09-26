@@ -4,7 +4,7 @@ use std::thread::spawn;
 use clap::Parser;
 use log::{error, info, warn};
 use crate::{session, Args};
-use crate::session::{Session, SessionData};
+use crate::session::{Session, SessionData, Status};
 use crate::storage::SessionStore;
 
 #[actix_web::get("/")]
@@ -18,8 +18,8 @@ async fn index(req: actix_web::HttpRequest, session_store: actix_web::web::Data<
                     store.create_session(Session {
                         uuid: uuid.as_u128(),
                         last_seen: std::time::SystemTime::now(),
-                        status: session::Status::Active,
-                        data: session::SessionData {
+                        status: Status::Active,
+                        data: SessionData {
                             user,
                             directory,
                         },

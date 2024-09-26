@@ -1,20 +1,17 @@
 mod session;
 mod storage;
 mod web;
+mod command;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::string::FromUtf8Error;
 use std::sync::{Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::thread;
-use std::thread::spawn;
 use clap::Parser as ClapParser;
 use pest::Parser;
 use log::{error, info, trace, warn};
-use pest::error::Error;
-use pest::iterators::Pairs;
+use pest::error::{Error, InputLocation};
+use reedline::{Prompt, PromptEditMode, PromptHistorySearch};
 use crate::parser::Rule;
-use crate::session::{Command, Session, SessionData};
 use crate::storage::SessionStore;
 
 static LOGO: &'static str = "
@@ -76,14 +73,17 @@ async fn main() -> std::io::Result<()> {
 
     // create store
     let session_store = Arc::new(RwLock::new(SessionStore::default()));
+    let mut alias_store: HashMap<String, u128> = HashMap::new();
 
     // start web
     let server_handle = web::run(session_store.clone()).await?;
-
-    let mut line_editor = reedline::Reedline::create();
-    let prompt = reedline::DefaultPrompt::default();
+    
+    // cli
+    let mut line_editor = reedline::Reedline::create().with_ansi_colors(false);
+    let prompt = ShellPrompt::default();
 
     info!("Starting cli...");
+    println!("{LOGO}");
     loop {
         let sig = line_editor.read_line(&prompt);
 
@@ -91,11 +91,45 @@ async fn main() -> std::io::Result<()> {
             Ok(reedline::Signal::Success(buffer)) => {
                 match parser::Parser::parse(Rule::command, buffer.as_str()) {
                     Ok(res) => {
-                        println!("Parsed uuid: {res:?}");
+                        let command = match session_store.read() {
+                            Ok(session_store) => {
+                                match command::Command::from_pairs(res, &session_store, &alias_store) {
+                                    Ok(command) => command,
+                                    Err(err) => {
+                                        println!("{err}");
+                                        continue
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                error!("{err}");
+                                continue
+                            }
+                        };
+                        match session_store.write() {
+                            Ok(mut session_store) => {
+                                if let Err(err) = command.execute(&mut session_store, &mut alias_store) {
+                                    error!("{err}");
+                                    continue
+                                }
+                            }
+                            Err(err) => {
+                                error!("{err}");
+                                continue
+                            }
+                        }
                     }
                     Err(err) => {
-
-                        println!("Failed to parse uuid: {err:?}");
+                        println!("Unknown command or error at:");
+                        println!("   $> {buffer}");
+                        match err.location {
+                            InputLocation::Pos(start) => {
+                                println!("      {:>amount$}^", " ", amount=start)
+                            }
+                            InputLocation::Span((start, end)) => {
+                                println!("      {:>amount$}{:>count$}", " ", "^", amount=start, count=(end-start))
+                            }
+                        }
                     }
                 }
             }
@@ -108,4 +142,43 @@ async fn main() -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct ShellPrompt;
+
+impl Prompt for ShellPrompt {
+    fn render_prompt_left(&self) -> Cow<str> {
+        "inside-job".to_owned().into()
+    }
+
+    fn render_prompt_right(&self) -> Cow<str> {
+        "".to_owned().into()
+    }
+
+    fn render_prompt_indicator(&self, prompt_mode: PromptEditMode) -> Cow<str> {
+        match prompt_mode {
+            PromptEditMode::Default | PromptEditMode::Emacs => "> ".into(),
+            PromptEditMode::Vi(vi_mode) => match vi_mode {
+                reedline::PromptViMode::Normal => "> ".into(),
+                reedline::PromptViMode::Insert => ": ".into(),
+            },
+            PromptEditMode::Custom(str) => format!("({})", str).into(),
+        }
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<str> {
+        ">>> ".to_owned().into()
+    }
+
+    fn render_prompt_history_search_indicator(&self, history_search: PromptHistorySearch) -> Cow<str> {
+        let prefix = match history_search.status {
+            reedline::PromptHistorySearchStatus::Passing => "",
+            reedline::PromptHistorySearchStatus::Failing => "failing ",
+        };
+        format!(
+            "({}reverse-search: {}) ",
+            prefix, history_search.term
+        ).into()
+    }
 }

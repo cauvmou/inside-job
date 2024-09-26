@@ -7,10 +7,14 @@ alias = @{"$" ~ alias_char+}
     alias_char = @{ASCII_ALPHA | "-" | "_"}
 
 session_command = {"session" ~ (op_show | op)}
-    object = {uuid | alias}
+    object = @{uuid | alias}
     op = _{object ~ (op_show | op_alias | op_open)}
     op_show = {"show" | "sh"}
     op_alias = {("alias" | ">") ~ alias}
     op_open = {"open" | "op" | "."}
 
-command = _{ SOI ~ session_command ~ EOI }
+help_command = {("help" | "?") ~ (help_op)?}
+    help_op = _{help_op_session}
+    help_op_session = @{"session"}
+
+command = _{ SOI ~ (session_command | help_command) ~ EOI }
