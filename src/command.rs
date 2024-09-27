@@ -3,6 +3,7 @@ use log::info;
 use pest::iterators::{Pair, Pairs};
 use uuid::{Error, Uuid};
 use crate::parser::Rule;
+use crate::session::SessionData;
 use crate::storage::SessionStore;
 
 #[derive(Debug)]
@@ -45,20 +46,14 @@ impl Command {
             [Token { rule: Rule::session_command, .. }, Token { rule: Rule::op_show, .. }, Token { rule: Rule::EOI, .. }] => {
                 Ok(Self::SessionShow(None))
             }
-            [Token { rule: Rule::session_command, .. }, Token { rule: Rule::object, value }, Token { rule: Rule::op_open, .. }, Token { rule: Rule::EOI, .. }] => {
-                let uuid = Self::object_to_uuid(&value, &alias_store).ok_or(format!("Invalid/Unknown uuid or alias: {value:?}"))?;
-                Ok(Self::SessionOpen(uuid))
-            }
-            [Token { rule: Rule::session_command, .. }, Token { rule: Rule::object, value }, Token { rule: Rule::op_show, .. }, Token { rule: Rule::EOI, .. }] => {
-                let uuid = Self::object_to_uuid(&value, &alias_store).ok_or(format!("Invalid/Unknown uuid or alias: {value:?}"))?;
-                Ok(Self::SessionShow(Some(uuid)))
-            }
-            [Token { rule: Rule::session_command, .. }, Token { rule: Rule::object, value: object }, Token { rule: Rule::op_alias, .. }, Token { rule: Rule::alias, value: alias }, Token { rule: Rule::EOI, .. }] => {
-                let uuid = Self::object_to_uuid(&object, &alias_store).ok_or(format!("Invalid/Unknown uuid or alias: {object:?}"))?;
-                Ok(Self::SessionCreateAlias {
-                    session: uuid,
-                    alias: alias.to_string(),
-                })
+            [Token { rule: Rule::session_command, .. }, Token { rule: Rule::object, value }, other @ ..] => {
+                let uuid = Self::object_to_uuid(&value, &session_store, &alias_store).ok_or(format!("Invalid/Unknown uuid or alias: {value:?}"))?;
+                match other {
+                    [Token { rule: Rule::op_show, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionShow(Some(uuid))),
+                    [Token { rule: Rule::op_open, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionOpen(uuid)),
+                    [Token { rule: Rule::op_alias, .. }, Token { rule: Rule::alias, value: alias }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionCreateAlias { session: uuid, alias: alias.to_string()}),
+                    _ => Err("Unimplemented command!".to_string())
+                }
             }
             [Token { rule: Rule::help_command, .. }, Token { rule: Rule::EOI, .. }] => {
                 Ok(Self::Help(HelpCommand::All))
@@ -70,10 +65,15 @@ impl Command {
         }
     }
 
-    fn object_to_uuid(value: &String, alias_store: &HashMap<String, u128>) -> Option<u128> {
+    fn object_to_uuid(value: &String, session_store: &SessionStore, alias_store: &HashMap<String, u128>) -> Option<u128> {
         match Uuid::parse_str(&value) {
             Ok(uuid) => {
-                Some(uuid.as_u128())
+                let uuid = uuid.as_u128();
+                if session_store.sessions.contains_key(&uuid) {
+                    Some(uuid)
+                } else {
+                    None
+                }
             }
             Err(_) => {
                 alias_store.get(value).map(|a| *a)
@@ -81,7 +81,7 @@ impl Command {
         }
     }
 
-    pub fn execute(&self, session_store: &mut SessionStore, alias_store: &mut HashMap<String, u128>) -> Result<(), String> {
+    pub fn execute(&self, session_store: &mut SessionStore, alias_store: &mut HashMap<String, u128>, active_session: &mut Option<u128>) -> Result<(), String> {
         info!("EXECUTING: {:?}", self);
         match self {
             Command::SessionShow(session) => {}
