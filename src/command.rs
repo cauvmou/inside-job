@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
-use log::info;
+use log::{debug, info};
 use pest::iterators::{Pair, Pairs};
 use uuid::{Error, Uuid};
 use crate::parser::Rule;
@@ -15,7 +15,8 @@ pub enum Command {
         alias: String,
     },
     SessionOpen(u128),
-    Help(HelpCommand)
+    SessionRemove(u128),
+    Help(HelpCommand),
 }
 
 #[derive(Debug)]
@@ -48,10 +49,11 @@ impl Command {
                 Ok(Self::SessionShow(None))
             }
             [Token { rule: Rule::session_command, .. }, Token { rule: Rule::object, value }, other @ ..] => {
-                let uuid = Self::object_to_uuid(&value, &session_store, &alias_store).ok_or(format!("Invalid/Unknown uuid or alias: {value:?}"))?;
+                let uuid = Self::object_to_uuid(value, session_store, alias_store).ok_or(format!("Invalid/Unknown uuid or alias: {value:?}"))?;
                 match other {
                     [Token { rule: Rule::op_show, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionShow(Some(uuid))),
                     [Token { rule: Rule::op_open, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionOpen(uuid)),
+                    [Token { rule: Rule::op_remove, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionRemove(uuid)),
                     [Token { rule: Rule::op_alias, .. }, Token { rule: Rule::alias, value: alias }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionCreateAlias { session: uuid, alias: alias.to_string()}),
                     _ => Err("Unimplemented command!".to_string())
                 }
@@ -83,20 +85,65 @@ impl Command {
     }
 
     pub fn execute(self, session_store: &mut SessionStore, alias_store: &mut HashMap<String, u128>, active_session: &mut Option<u128>) -> Result<(), String> {
-        info!("EXECUTING: {:?}", self);
+        use prettytable as pt;
+        debug!("EXECUTING: {:?}", self);
         match self {
             Command::SessionShow(session) => {
-                for session in session_store.sessions.values() {
-                    println!("{uuid} | {user:<48} | {dir:<48} | {time:.2}s", uuid=Uuid::from_u128(session.uuid), user=session.data.user, dir=session.data.directory, time=SystemTime::now().duration_since(session.last_seen).unwrap().as_secs_f32());
-                }
+                let sessions = if let Some(session) = session {
+                    let alias = alias_store.iter().find_map(|(key, value)| if *value == session { Some(key.to_string()) } else { None });
+                    vec![(session_store.sessions.get(&session).unwrap(), alias)]
+                } else {
+                    session_store.sessions.values().map(|session| {
+                        let alias = alias_store.iter().find_map(|(key, value)| if *value == session.uuid { Some(key.to_string()) } else { None });
+                        (session, alias)
+                    }).collect()
+                };
+                let rows = sessions.iter().map(|(session, alias)| 
+                    pt::Row::new(vec![
+                        pt::Cell::new(Uuid::from_u128(session.uuid).to_string().as_str()),
+                        pt::Cell::new(session.data.user.to_string().as_str()),
+                        pt::Cell::new(session.data.directory.to_string().as_str()),
+                        pt::Cell::new(format!("{}s", SystemTime::now().duration_since(session.last_seen).unwrap().as_secs_f32()).as_str()),
+                        pt::Cell::new(alias.clone().unwrap_or("Undefined".to_string()).as_str()),
+                    ])
+                ).collect();
+                let mut table = pt::Table::init(rows);
+                table.set_titles(pt::Row::new(vec![
+                    pt::Cell::new("UUID"), 
+                    pt::Cell::new("User"),
+                    pt::Cell::new("Directory"),
+                    pt::Cell::new("Last Seen"),
+                    pt::Cell::new("Alias"),
+                ]));
+                let format = pt::format::FormatBuilder::new()
+                    .column_separator('│')
+                    .borders('│')
+                    .separators(&[pt::format::LinePosition::Top], pt::format::LineSeparator::new('─', '┬', '┬', '┬'))
+                    .separators(&[pt::format::LinePosition::Bottom], pt::format::LineSeparator::new('─', '┴', '┴', '┴'))
+                    .separators(&[pt::format::LinePosition::Title], pt::format::LineSeparator::new('─', '┼', '┼', '┼'))
+                    .padding(1, 1)
+                    .build();
+                table.set_format(format);
+                table.printstd();
             }
             Command::SessionCreateAlias { session, alias } => {
+                println!("Created alias {alias} for {}", Uuid::from_u128(session));
                 alias_store.insert(alias, session);
             }
             Command::SessionOpen(session) => {
                 *active_session = Some(session)
             }
-            Command::Help(command) => {}
+            Command::SessionRemove(session) => {
+                if let Some(session) = session_store.sessions.remove(&session) {
+                    println!("Removed session: {}", Uuid::from_u128(session.uuid));
+                }
+            }
+            Command::Help(command) => {
+                match command {
+                    HelpCommand::All => {}
+                    HelpCommand::Session => {}
+                }
+            }
         }
         Ok(())
     }

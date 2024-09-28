@@ -33,17 +33,29 @@ async fn index(req: actix_web::HttpRequest, session_store: actix_web::web::Data<
 #[actix_web::get("/{uuid}")]
 async fn cmd_input(path: actix_web::web::Path<(String,)>, req: actix_web::HttpRequest, session_store: actix_web::web::Data<Arc<RwLock<SessionStore>>>) -> impl actix_web::Responder {
     if let (Some(header_user), Some(header_dir)) = (req.headers().get("x-User"), req.headers().get("x-Dir")) {
-        if let (Ok(_), Ok(_)) = (header_user.to_str().map(String::from), header_dir.to_str().map(String::from)) {
+        if let (Ok(user), Ok(directory)) = (header_user.to_str().map(String::from), header_dir.to_str().map(String::from)) {
             let Ok(uuid) = uuid::Uuid::parse_str(path.0.as_str()) else {
                 warn!("cannot parse uuid: {}", path.0.as_str());
                 return actix_web::HttpResponse::BadRequest().finish();
             };
             if let Ok(mut store) = session_store.write() {
+                if !store.sessions.contains_key(&uuid.as_u128()) {
+                    info!("resumed client ({uuid}) with user: {user}");
+                    store.create_session(Session {
+                        uuid: uuid.as_u128(),
+                        last_seen: std::time::SystemTime::now(),
+                        status: Status::Active,
+                        data: SessionData {
+                            user,
+                            directory,
+                        },
+                    });
+                }
                 let _ = store.seen(uuid.as_u128());
-                if let Ok(command) = store.get_pending_command(uuid.as_u128()) {
-                    return actix_web::HttpResponse::Ok().content_type("text/plain").body(command.clone());
+                return if let Ok(command) = store.get_pending_command(uuid.as_u128()) {
+                    actix_web::HttpResponse::Ok().content_type("text/plain").body(command.clone())
                 } else {
-                    return actix_web::HttpResponse::Ok().content_type("text/plain").body("");
+                    actix_web::HttpResponse::Ok().content_type("text/plain").body("")
                 }
             }
         }

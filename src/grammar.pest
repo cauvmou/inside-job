@@ -8,10 +8,11 @@ alias = @{"$" ~ alias_char+}
 
 session_command = {"session" ~ (op_show | op)}
     object = @{uuid | alias}
-    op = _{object ~ (op_show | op_alias | op_open)}
+    op = _{object ~ (op_show | op_alias | op_open | op_remove)}
     op_show = {"show" | "sh"}
     op_alias = {("alias" | ">") ~ alias}
     op_open = {"open" | "op" | "."}
+    op_remove = {"forget" | "x"}
 
 help_command = {("help" | "?") ~ (help_op)?}
     help_op = _{help_op_session}
