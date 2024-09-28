@@ -6,13 +6,17 @@ mod command;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::thread;
+use std::time::Duration;
+use actix_web::rt::time::sleep;
 use clap::Parser as ClapParser;
 use pest::Parser;
 use log::{error, info, trace, warn};
 use pest::error::{Error, InputLocation};
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch};
+use uuid::Uuid;
 use crate::parser::Rule;
-use crate::storage::SessionStore;
+use crate::storage::{LockState, SessionStore};
 
 static LOGO: &'static str = "
             ┌───┐
@@ -81,64 +85,66 @@ async fn main() -> std::io::Result<()> {
     
     // cli
     let mut line_editor = reedline::Reedline::create().with_ansi_colors(false);
-    let prompt = ShellPrompt::default();
 
     info!("Starting cli...");
     println!("{LOGO}");
     loop {
-        let sig = line_editor.read_line(&prompt);
+        let prompt: Box<dyn Prompt> = match active_session {
+            Some(uuid) => Box::new(SessionPrompt(Uuid::from_u128(uuid))),
+            None => Box::new(ShellPrompt)
+        };
+        let sig = line_editor.read_line(prompt.as_ref());
 
         match sig {
             Ok(reedline::Signal::Success(buffer)) => {
                 // TODO: REFACTOR
+                if buffer.is_empty() {
+                    continue;
+                }
                 if let Some(uuid) = active_session {
                     if buffer.as_str() == "quit" {
                         active_session = None;
                         continue
                     }
-                    match session_store.write() {
-                        Ok(session_store) => {
-                            match session_store.start_command(uuid, buffer) {
-                                Ok(_) => {
-                                    
-                                }
-                                Err(err) => {
-                                    error!("{err}");
+                    let result = if let Ok(mut session_store) = session_store.write() {
+                        session_store.start_command(uuid, buffer).ok()
+                    } else {None};
+                    if let Some(()) = result {
+                        loop {
+                            sleep(Duration::from_millis(500)).await;
+                            if let Ok(session_store) = session_store.read() {
+                                if let Some(Some(LockState::ToReceive(output))) = session_store.session_lock.get(&uuid) {
+                                    if !output.ends_with("\n") {
+                                        println!("{output}");
+                                    } else {
+                                        print!("{output}");
+                                    }
+                                    break
                                 }
                             }
                         }
-                        Err(err) => {
-                            error!("{err}");
+                        if let Ok(mut session_store) = session_store.write() {
+                            session_store.session_lock.insert(uuid, None);
                         }
                     }
                 } else {
                     match parser::Parser::parse(Rule::command, buffer.as_str()) {
                         Ok(res) => {
-                            let command = match session_store.read() {
-                                Ok(session_store) => {
-                                    match command::Command::from_pairs(res, &session_store, &alias_store) {
-                                        Ok(command) => command,
-                                        Err(err) => {
-                                            println!("{err}");
-                                            continue
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("{err}");
-                                    continue
-                                }
-                            };
-                            match session_store.write() {
-                                Ok(mut session_store) => {
-                                    if let Err(err) = command.execute(&mut session_store, &mut alias_store, &mut active_session) {
-                                        error!("{err}");
+                            let command = if let Ok(session_store) = session_store.read() {
+                                match command::Command::from_pairs(res, &session_store, &alias_store) {
+                                    Ok(command) => command,
+                                    Err(err) => {
+                                        println!("{err}");
                                         continue
                                     }
                                 }
-                                Err(err) => {
+                            } else {
+                                continue
+                            };
+
+                            if let Ok(mut session_store) = session_store.write() {
+                                if let Err(err) = command.execute(&mut session_store, &mut alias_store, &mut active_session) {
                                     error!("{err}");
-                                    continue
                                 }
                             }
                         }
@@ -147,10 +153,10 @@ async fn main() -> std::io::Result<()> {
                             println!("   $> {buffer}");
                             match err.location {
                                 InputLocation::Pos(start) => {
-                                    println!("      {:>amount$}^", " ", amount = start)
+                                    println!("      {:>amount$}^", "", amount = start)
                                 }
                                 InputLocation::Span((start, end)) => {
-                                    println!("      {:>amount$}{:>count$}", " ", "^", amount=start, count=(end-start))
+                                    println!("      {:>amount$}{:>count$}", "", "^", amount=start, count=(end-start))
                                 }
                             }
                         }
@@ -162,7 +168,9 @@ async fn main() -> std::io::Result<()> {
                 server_handle.stop(false).await;
                 break;
             }
-            _ => {}
+            other => {
+                info!("Unhandled {:?}", other);
+            }
         }
     }
     Ok(())

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::SystemTime;
 use log::info;
 use pest::iterators::{Pair, Pairs};
 use uuid::{Error, Uuid};
@@ -81,12 +82,20 @@ impl Command {
         }
     }
 
-    pub fn execute(&self, session_store: &mut SessionStore, alias_store: &mut HashMap<String, u128>, active_session: &mut Option<u128>) -> Result<(), String> {
+    pub fn execute(self, session_store: &mut SessionStore, alias_store: &mut HashMap<String, u128>, active_session: &mut Option<u128>) -> Result<(), String> {
         info!("EXECUTING: {:?}", self);
         match self {
-            Command::SessionShow(session) => {}
-            Command::SessionCreateAlias { session, alias } => {}
-            Command::SessionOpen(session) => {}
+            Command::SessionShow(session) => {
+                for session in session_store.sessions.values() {
+                    println!("{uuid} | {user:<48} | {dir:<48} | {time:.2}s", uuid=Uuid::from_u128(session.uuid), user=session.data.user, dir=session.data.directory, time=SystemTime::now().duration_since(session.last_seen).unwrap().as_secs_f32());
+                }
+            }
+            Command::SessionCreateAlias { session, alias } => {
+                alias_store.insert(alias, session);
+            }
+            Command::SessionOpen(session) => {
+                *active_session = Some(session)
+            }
             Command::Help(command) => {}
         }
         Ok(())

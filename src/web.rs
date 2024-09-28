@@ -12,27 +12,22 @@ async fn index(req: actix_web::HttpRequest, session_store: actix_web::web::Data<
     if let (Some(header_user), Some(header_dir)) = (req.headers().get("x-User"), req.headers().get("x-Dir")) {
         if let (Ok(user), Ok(directory)) = (header_user.to_str().map(String::from), header_dir.to_str().map(String::from)) {
             let uuid = uuid::Uuid::new_v4();
-            return match session_store.write() {
-                Ok(mut store) => {
-                    info!("new client ({uuid}) with user: {user}");
-                    store.create_session(Session {
-                        uuid: uuid.as_u128(),
-                        last_seen: std::time::SystemTime::now(),
-                        status: Status::Active,
-                        data: SessionData {
-                            user,
-                            directory,
-                        },
-                    });
-                    actix_web::HttpResponse::Ok().body(uuid.to_string())
-                }
-                Err(_) => {
-                    actix_web::HttpResponse::InternalServerError().body("Failed to acquire session store lock!".to_string())
-                }
-            };
+            if let Ok(mut store) = session_store.write() {
+                info!("new client ({uuid}) with user: {user}");
+                store.create_session(Session {
+                    uuid: uuid.as_u128(),
+                    last_seen: std::time::SystemTime::now(),
+                    status: Status::Active,
+                    data: SessionData {
+                        user,
+                        directory,
+                    },
+                });
+                return actix_web::HttpResponse::Ok().content_type("text/plain").body(uuid.to_string());
+            }
         }
     }
-    actix_web::HttpResponse::BadRequest().finish()
+    actix_web::HttpResponse::InternalServerError().finish()
 }
 
 #[actix_web::get("/{uuid}")]
@@ -43,16 +38,17 @@ async fn cmd_input(path: actix_web::web::Path<(String,)>, req: actix_web::HttpRe
                 warn!("cannot parse uuid: {}", path.0.as_str());
                 return actix_web::HttpResponse::BadRequest().finish();
             };
-            let Ok(store) = session_store.read() else {
-                return actix_web::HttpResponse::InternalServerError().body("Failed to acquire session store lock!".to_string())
-            };
-            return match store.get_pending_command(uuid.as_u128()) {
-                Ok(command) => actix_web::HttpResponse::Ok().body(command),
-                Err(err) => actix_web::HttpResponse::InternalServerError().body(err),
-            };
+            if let Ok(mut store) = session_store.write() {
+                let _ = store.seen(uuid.as_u128());
+                if let Ok(command) = store.get_pending_command(uuid.as_u128()) {
+                    return actix_web::HttpResponse::Ok().content_type("text/plain").body(command.clone());
+                } else {
+                    return actix_web::HttpResponse::Ok().content_type("text/plain").body("");
+                }
+            }
         }
     }
-    actix_web::HttpResponse::BadRequest().finish()
+    actix_web::HttpResponse::InternalServerError().finish()
 }
 
 #[actix_web::post("/{uuid}")]
@@ -70,24 +66,24 @@ async fn cmd_output(path: actix_web::web::Path<(String,), >, bytes: actix_web::w
                     return actix_web::HttpResponse::BadRequest().finish();
                 }
             };
-            let Ok(store) = session_store.read() else {
-                return actix_web::HttpResponse::InternalServerError().body("Failed to acquire session store lock!".to_string())
-            };
-            let command = match store.resolve_command(uuid.as_u128(), output) {
-                Ok(command) => command,
-                Err(err) => return actix_web::HttpResponse::InternalServerError().body(err.to_string().to_string())
-            };
-            match store.update_session_data(uuid.as_u128(), SessionData {
-                user,
-                directory,
-            }) {
-                Ok(_) => {}
-                Err(err) => return actix_web::HttpResponse::InternalServerError().body(err.to_string().to_string())
+            if let Ok(mut store) = session_store.write() {
+                let command = match store.resolve_command(uuid.as_u128(), output) {
+                    Ok(command) => command,
+                    Err(_) => return actix_web::HttpResponse::InternalServerError().finish(),
+                };
+                match store.insert_command(uuid.as_u128(), command) {
+                    Ok(_) => {}
+                    Err(_) => return actix_web::HttpResponse::InternalServerError().finish(),
+                }
+                match store.update_session_data(uuid.as_u128(), SessionData {
+                    user,
+                    directory,
+                }) {
+                    Ok(_) => {}
+                    Err(_) => return actix_web::HttpResponse::InternalServerError().finish(),
+                }
+                return actix_web::HttpResponse::Ok().finish()
             }
-            return match store.insert_command(uuid.as_u128(), command) {
-                Ok(_) => actix_web::HttpResponse::Ok().finish(),
-                Err(err) => actix_web::HttpResponse::InternalServerError().body(err.to_string().to_string())
-            };
         }
     }
     actix_web::HttpResponse::BadRequest().finish()
