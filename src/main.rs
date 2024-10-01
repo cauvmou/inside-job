@@ -6,8 +6,12 @@ mod command;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::AtomicBool;
 use std::thread;
+use std::thread::spawn;
 use std::time::Duration;
+use actix_web::rt::signal;
+use actix_web::rt::signal::ctrl_c;
 use actix_web::rt::time::sleep;
 use clap::Parser as ClapParser;
 use pest::Parser;
@@ -17,6 +21,8 @@ use uuid::Uuid;
 use crate::parser::Rule;
 use crate::storage::{LockState, SessionStore};
 use colored::Colorize;
+use pollster::FutureExt;
+use reedline::Color;
 
 static LOGO: &'static str = "
             ┌───┐
@@ -37,8 +43,8 @@ struct Args {
     address: std::net::Ipv4Addr,
     #[arg(short, long, default_value_t = 4132)]
     port: u16,
-    // #[arg(short, long, default_value_t = log::LevelFilter::Info)]
-    // loglevel: log::LevelFilter,
+    #[arg(short, long, default_value_t = log::LevelFilter::Info)]
+    loglevel: log::LevelFilter,
     #[arg(
         short,
         long,
@@ -95,7 +101,6 @@ async fn main() -> std::io::Result<()> {
 
     let printer = reedline::ExternalPrinter::new(u16::MAX as usize);
     let logger: Box<dyn Log> = Box::new(ExternalPrinterLogger(printer.clone()));
-    let mut line_editor = reedline::Reedline::create().with_ansi_colors(true).with_external_printer(printer);
 
     // init logger
     println!("{LOGO}");
@@ -109,17 +114,17 @@ async fn main() -> std::io::Result<()> {
         })
         .chain(fern::Dispatch::new().filter(|metadata| metadata.target().starts_with("insidejob")).level(log::LevelFilter::Info).chain(logger))
         .apply().expect("logger initialization failed");
-    
+
     // create store
     let session_store = Arc::new(RwLock::new(SessionStore::default()));
     let mut alias_store: HashMap<String, u128> = HashMap::new();
     let mut active_session: Option<u128> = None;
 
     // start web
-    let server_handle = web::run(session_store.clone()).await?;
 
     // cli
-    info!("Starting cli...");
+    let server_handle = web::run(session_store.clone()).await?;
+    let mut line_editor = reedline::Reedline::create().with_ansi_colors(true).with_external_printer(printer);
     loop {
         let prompt: Box<dyn reedline::Prompt> = match active_session {
             Some(uuid) => Box::new(SessionPrompt(Uuid::from_u128(uuid))),
@@ -214,7 +219,7 @@ struct ShellPrompt;
 
 impl reedline::Prompt for ShellPrompt {
     fn render_prompt_left(&self) -> Cow<str> {
-        "inside-job".to_owned().into()
+        "[ inside-job ]".to_owned().into()
     }
 
     fn render_prompt_right(&self) -> Cow<str> {
@@ -223,12 +228,8 @@ impl reedline::Prompt for ShellPrompt {
 
     fn render_prompt_indicator(&self, prompt_mode: reedline::PromptEditMode) -> Cow<str> {
         match prompt_mode {
-            reedline::PromptEditMode::Default | reedline::PromptEditMode::Emacs => "> ".into(),
-            reedline::PromptEditMode::Vi(vi_mode) => match vi_mode {
-                reedline::PromptViMode::Normal => "> ".into(),
-                reedline::PromptViMode::Insert => ": ".into(),
-            },
-            reedline::PromptEditMode::Custom(str) => format!("({})", str).into(),
+            reedline::PromptEditMode::Default | reedline::PromptEditMode::Emacs => ": ".into(),
+            _ => "> ".into()
         }
     }
 
@@ -245,6 +246,14 @@ impl reedline::Prompt for ShellPrompt {
             "({}reverse-search: {}) ",
             prefix, history_search.term
         ).into()
+    }
+
+    fn get_prompt_color(&self) -> Color {
+        Color::Green
+    }
+
+    fn get_indicator_color(&self) -> Color {
+        Color::Green
     }
 }
 
@@ -252,7 +261,7 @@ struct SessionPrompt(uuid::Uuid);
 
 impl reedline::Prompt for SessionPrompt {
     fn render_prompt_left(&self) -> Cow<str> {
-        self.0.to_string().into()
+        format!("[ {} ]", self.0).into()
     }
 
     fn render_prompt_right(&self) -> Cow<str> {
@@ -261,12 +270,8 @@ impl reedline::Prompt for SessionPrompt {
 
     fn render_prompt_indicator(&self, prompt_mode: reedline::PromptEditMode) -> Cow<str> {
         match prompt_mode {
-            reedline::PromptEditMode::Default | reedline::PromptEditMode::Emacs => "> ".into(),
-            reedline::PromptEditMode::Vi(vi_mode) => match vi_mode {
-                reedline::PromptViMode::Normal => "> ".into(),
-                reedline::PromptViMode::Insert => ": ".into(),
-            },
-            reedline::PromptEditMode::Custom(str) => format!("({})", str).into(),
+            reedline::PromptEditMode::Default | reedline::PromptEditMode::Emacs => "$ ".into(),
+            _ => "> ".into()
         }
     }
 
@@ -283,5 +288,13 @@ impl reedline::Prompt for SessionPrompt {
             "({}reverse-search: {}) ",
             prefix, history_search.term
         ).into()
+    }
+
+    fn get_prompt_color(&self) -> Color {
+        Color::Cyan
+    }
+
+    fn get_indicator_color(&self) -> Color {
+        Color::Cyan
     }
 }

@@ -16,9 +16,12 @@ serde_json = "1"
 clap = { version = "4.5.17", features = ["derive", "cargo"] }
 log = "0.4.22"
 fern = "0.6.2"
-reedline = { version = "0.35.0", features = ["external_printer"] }
+# Currently there is an issue with the external printer. A pull request is open to mitigate this: https://github.com/nushell/reedline/pull/737
+# In order to fix this for the moment, I made a quick patch on a fork.
+reedline = { git = "https://github.com/cauvmou/reedline.git", branch = "main", features = ["external_printer"] }
 pollster = "0.3.0"
 pest = "2.7.13"
 pest_derive = "2.7.13"
 colored = "2.1.0"
 prettytable = "0.10.0"
+ctrlc = "3.4.5"

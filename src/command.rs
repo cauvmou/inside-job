@@ -122,12 +122,19 @@ impl Command {
                     .separators(&[pt::format::LinePosition::Bottom], pt::format::LineSeparator::new('─', '┴', '┴', '┴'))
                     .separators(&[pt::format::LinePosition::Title], pt::format::LineSeparator::new('─', '┼', '┼', '┼'))
                     .padding(1, 1)
+                    .indent(3)
                     .build();
                 table.set_format(format);
                 table.printstd();
             }
             Command::SessionCreateAlias { session, alias } => {
-                println!("Created alias {alias} for {}", Uuid::from_u128(session));
+                // Remove old_alias if one exists
+                if let Some(old_alias) = alias_store.iter().find_map(|(key, value)| if *value == session { Some(key.to_string()) } else { None }) {
+                    alias_store.remove(&old_alias);
+                    println!("Replaced alias {old_alias} with {alias} for {}", Uuid::from_u128(session));
+                } else {
+                    println!("Created alias {alias} for {}", Uuid::from_u128(session));
+                }
                 alias_store.insert(alias, session);
             }
             Command::SessionOpen(session) => {
