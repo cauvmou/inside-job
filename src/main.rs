@@ -112,7 +112,7 @@ async fn main() -> std::io::Result<()> {
                 message,
             ))
         })
-        .chain(fern::Dispatch::new().filter(|metadata| metadata.target().starts_with("insidejob")).level(log::LevelFilter::Info).chain(logger))
+        .chain(fern::Dispatch::new().filter(|metadata| metadata.target().starts_with("insidejob")).level(args.loglevel).chain(logger))
         .apply().expect("logger initialization failed");
 
     // create store
@@ -173,7 +173,7 @@ async fn main() -> std::io::Result<()> {
                                 match command::Command::from_pairs(res, &session_store, &alias_store) {
                                     Ok(command) => command,
                                     Err(err) => {
-                                        println!("{err}");
+                                        error!("{err}");
                                         continue;
                                     }
                                 }
@@ -182,7 +182,7 @@ async fn main() -> std::io::Result<()> {
                             };
 
                             if let Ok(mut session_store) = session_store.write() {
-                                if let Err(err) = command.execute(&mut session_store, &mut alias_store, &mut active_session) {
+                                if let Err(err) = command.execute(&mut session_store, &mut alias_store, &mut active_session).await {
                                     error!("{err}");
                                 }
                             }

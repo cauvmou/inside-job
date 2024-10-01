@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 use log::{debug, error, info};
 use pest::iterators::{Pair, Pairs};
+use pollster::FutureExt;
 use uuid::{Error, Uuid};
 use crate::parser::Rule;
 use crate::session::SessionData;
@@ -16,7 +17,7 @@ pub enum Command {
     },
     SessionOpen(u128),
     SessionRemove(u128),
-    FlashFirmware,
+    FlashFirmware(Option<String>),
     Help(HelpCommand),
 }
 
@@ -46,21 +47,23 @@ impl Command {
         let rules = pairs.flatten().map(Token::from).collect::<Vec<_>>();
         let rules = rules.iter().collect::<Vec<_>>();
         match rules.as_slice() {
-            [Token { rule: Rule::session_command, .. }, Token { rule: Rule::op_show, .. }, Token { rule: Rule::EOI, .. }] => {
+            [Token { rule: Rule::session_command, .. }, Token { rule: Rule::session_op_show, .. }, Token { rule: Rule::EOI, .. }] => {
                 Ok(Self::SessionShow(None))
             }
             [Token { rule: Rule::session_command, .. }, Token { rule: Rule::object, value }, other @ ..] => {
                 let uuid = Self::object_to_uuid(value, session_store, alias_store).ok_or(format!("Invalid/Unknown uuid or alias: {value:?}"))?;
                 match other {
-                    [Token { rule: Rule::op_show, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionShow(Some(uuid))),
-                    [Token { rule: Rule::op_open, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionOpen(uuid)),
-                    [Token { rule: Rule::op_remove, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionRemove(uuid)),
-                    [Token { rule: Rule::op_alias, .. }, Token { rule: Rule::alias, value: alias }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionCreateAlias { session: uuid, alias: alias.to_string() }),
+                    [Token { rule: Rule::session_op_show, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionShow(Some(uuid))),
+                    [Token { rule: Rule::session_op_open, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionOpen(uuid)),
+                    [Token { rule: Rule::session_op_remove, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionRemove(uuid)),
+                    [Token { rule: Rule::session_op_alias, .. }, Token { rule: Rule::alias, value: alias }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionCreateAlias { session: uuid, alias: alias.to_string() }),
                     _ => Err("Unimplemented command!".to_string())
                 }
             }
-            [Token { rule: Rule::ducky_command, .. }, Token { rule: Rule::ducky_op, .. }, Token { rule: Rule::EOI, .. }] => {
-                Ok(Command::FlashFirmware)
+            [Token { rule: Rule::ducky_command, .. }, other @ ..] => match other {
+                [Token { rule: Rule::ducky_op_flash, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::FlashFirmware(None)),
+                [Token { rule: Rule::ducky_op_flash, .. }, Token { rule: Rule::firmware_url, value}, Token { rule: Rule::EOI, .. }] => Ok(Self::FlashFirmware(Some(value.to_string()))),
+                _ => Err("Unimplemented command!".to_string())
             }
             [Token { rule: Rule::help_command, .. }, Token { rule: Rule::EOI, .. }] => {
                 Ok(Self::Help(HelpCommand::All))
@@ -88,7 +91,7 @@ impl Command {
         }
     }
 
-    pub fn execute(self, session_store: &mut SessionStore, alias_store: &mut HashMap<String, u128>, active_session: &mut Option<u128>) -> Result<(), String> {
+    pub async fn execute(self, session_store: &mut SessionStore, alias_store: &mut HashMap<String, u128>, active_session: &mut Option<u128>) -> Result<(), String> {
         use prettytable as pt;
         debug!("EXECUTING: {:?}", self);
         match self {
@@ -155,7 +158,7 @@ impl Command {
                     HelpCommand::Session => {}
                 }
             }
-            Command::FlashFirmware => {
+            Command::FlashFirmware(url) => {
                 let disks = sysinfo::Disks::new_with_refreshed_list();
                 let disks = disks.into_iter()
                     .filter(|disk| disk.is_removable())
@@ -170,11 +173,28 @@ impl Command {
                         let label = std::str::from_utf8(&output.stdout).unwrap().trim().replace("/dev/disk/by-label/", "");
                         label == "RPI-RP2"
                     }).collect::<Vec<_>>();
-                if let Some(disk) = disks.first() {
-                    info!("Flashing on disk: {}", disk.name().to_string_lossy())
+                if disks.is_empty() {
+                    return Err("No disk to flash found, searched for disk label: \"RPI-RP2\"!".to_string())
                 } else {
-                    error!("No uf2 disk found!")
+                    info!("Flashing {} disk(s): {}", disks.len(), disks.iter().map(|disk| disk.name().to_string_lossy()).collect::<Vec<_>>().join(", "));
                 }
+                let firmware = if let Some(url) = url {
+                    info!("Using custom firmware: {url}");
+                    reqwest::get(url).await.map_err(|err| err.to_string())?.bytes().await.map_err(|err| err.to_string())?
+                } else {
+                    let latest_url_github = reqwest::get("https://github.com/adafruit/circuitpython/releases/latest").await.map_err(|err| err.to_string())?.url().to_string();
+                    let latest_version = latest_url_github.replace("https://github.com/adafruit/circuitpython/releases/tag/", "");
+                    info!("Using latest version {latest_version} of circuit python for rp-pico");
+                    let latest_url = format!("https://downloads.circuitpython.org/bin/raspberry_pi_pico/en_US/adafruit-circuitpython-raspberry_pi_pico-en_US-{latest_version}.uf2");
+                    reqwest::get(latest_url).await.map_err(|err| err.to_string())?.bytes().await.map_err(|err| err.to_string())?
+                };
+                info!("Copying {} bytes to disk", firmware.len());
+                for disk in disks {
+                    let path = disk.mount_point().join("firmware.uf2");
+                    info!("Copying to {}", path.to_string_lossy());
+                    std::fs::write(path, firmware.clone()).map_err(|err| err.to_string())?;
+                }
+                info!("Successfully flashed devices!")
             }
         }
         Ok(())
