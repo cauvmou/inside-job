@@ -148,22 +148,23 @@ async fn main() -> std::io::Result<()> {
                         session_store.start_command(uuid, buffer).ok()
                     } else { None };
                     if let Some(()) = result {
-                        loop {
-                            sleep(Duration::from_millis(10)).await;
-                            if let Ok(session_store) = session_store.read() {
-                                if let Some(Some(LockState::ToReceive(output))) = session_store.session_lock.get(&uuid) {
-                                    if !output.ends_with("\n") {
-                                        println!("{output}");
-                                    } else {
-                                        print!("{output}");
+                        let session_store = session_store.clone();
+                        spawn(move || {
+                            loop {
+                                thread::sleep(Duration::from_millis(10));
+                                if let Ok(session_store) = session_store.read() {
+                                    if let Some(Some(LockState::ToReceive(output))) = session_store.session_lock.get(&uuid) {
+                                        info!("{}: {output}", Uuid::from_u128(uuid));
+                                        break;
                                     }
-                                    break;
                                 }
                             }
-                        }
-                        if let Ok(mut session_store) = session_store.write() {
-                            session_store.session_lock.insert(uuid, None);
-                        }
+                            if let Ok(mut session_store) = session_store.write() {
+                                session_store.session_lock.insert(uuid, None);
+                            }
+                        });
+                    } else {
+                        error!("Still waiting on previous command!")
                     }
                 } else {
                     match parser::Parser::parse(Rule::command, buffer.as_str()) {

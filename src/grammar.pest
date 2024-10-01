@@ -14,8 +14,11 @@ session_command = {"session" ~ (op_show | op)}
     op_open = {"open" | "op" | "."}
     op_remove = {"forget" | "x"}
 
+ducky_command = {"ducky" ~ ducky_op}
+    ducky_op = {"flash-firmware" | "write" }
+
 help_command = {("help" | "?") ~ (help_op)?}
     help_op = _{help_op_session}
     help_op_session = @{"session"}
 
-command = _{ SOI ~ (session_command | help_command) ~ EOI }
+command = _{ SOI ~ (session_command | ducky_command | help_command) ~ EOI }

@@ -71,13 +71,7 @@ async fn cmd_output(path: actix_web::web::Path<(String,), >, bytes: actix_web::w
                 warn!("cannot parse uuid: {}", path.0.as_str());
                 return actix_web::HttpResponse::BadRequest().finish();
             };
-            let output = match String::from_utf8(bytes.to_vec()) {
-                Ok(string) => string,
-                Err(err) => {
-                    error!("failed to convert bytes to string: {err}");
-                    return actix_web::HttpResponse::BadRequest().finish();
-                }
-            };
+            let output = String::from_utf8_lossy(&bytes.to_vec()).to_string();
             if let Ok(mut store) = session_store.write() {
                 let command = match store.resolve_command(uuid.as_u128(), output) {
                     Ok(command) => command,

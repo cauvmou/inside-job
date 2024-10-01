@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
-use log::{debug, info};
+use log::{debug, error, info};
 use pest::iterators::{Pair, Pairs};
 use uuid::{Error, Uuid};
 use crate::parser::Rule;
@@ -16,6 +16,7 @@ pub enum Command {
     },
     SessionOpen(u128),
     SessionRemove(u128),
+    FlashFirmware,
     Help(HelpCommand),
 }
 
@@ -54,9 +55,12 @@ impl Command {
                     [Token { rule: Rule::op_show, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionShow(Some(uuid))),
                     [Token { rule: Rule::op_open, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionOpen(uuid)),
                     [Token { rule: Rule::op_remove, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionRemove(uuid)),
-                    [Token { rule: Rule::op_alias, .. }, Token { rule: Rule::alias, value: alias }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionCreateAlias { session: uuid, alias: alias.to_string()}),
+                    [Token { rule: Rule::op_alias, .. }, Token { rule: Rule::alias, value: alias }, Token { rule: Rule::EOI, .. }] => Ok(Self::SessionCreateAlias { session: uuid, alias: alias.to_string() }),
                     _ => Err("Unimplemented command!".to_string())
                 }
+            }
+            [Token { rule: Rule::ducky_command, .. }, Token { rule: Rule::ducky_op, .. }, Token { rule: Rule::EOI, .. }] => {
+                Ok(Command::FlashFirmware)
             }
             [Token { rule: Rule::help_command, .. }, Token { rule: Rule::EOI, .. }] => {
                 Ok(Self::Help(HelpCommand::All))
@@ -98,7 +102,7 @@ impl Command {
                         (session, alias)
                     }).collect()
                 };
-                let rows = sessions.iter().map(|(session, alias)| 
+                let rows = sessions.iter().map(|(session, alias)|
                     pt::Row::new(vec![
                         pt::Cell::new(Uuid::from_u128(session.uuid).to_string().as_str()),
                         pt::Cell::new(session.data.user.to_string().as_str()),
@@ -109,7 +113,7 @@ impl Command {
                 ).collect();
                 let mut table = pt::Table::init(rows);
                 table.set_titles(pt::Row::new(vec![
-                    pt::Cell::new("UUID"), 
+                    pt::Cell::new("UUID"),
                     pt::Cell::new("User"),
                     pt::Cell::new("Directory"),
                     pt::Cell::new("Last Seen"),
@@ -149,6 +153,27 @@ impl Command {
                 match command {
                     HelpCommand::All => {}
                     HelpCommand::Session => {}
+                }
+            }
+            Command::FlashFirmware => {
+                let disks = sysinfo::Disks::new_with_refreshed_list();
+                let disks = disks.into_iter()
+                    .filter(|disk| disk.is_removable())
+                    .filter(|disk| disk.file_system() == "vfat")
+                    .filter(|disk| {
+                        let to_execute = format!("find -L /dev/disk/by-label -inum $(stat -c %i {}) -print", disk.name().to_string_lossy());
+                        let output = std::process::Command::new("/bin/bash")
+                            .arg("-c")
+                            .arg(to_execute)
+                            .output()
+                            .expect("failed to start process!");
+                        let label = std::str::from_utf8(&output.stdout).unwrap().trim().replace("/dev/disk/by-label/", "");
+                        label == "RPI-RP2"
+                    }).collect::<Vec<_>>();
+                if let Some(disk) = disks.first() {
+                    info!("Flashing on disk: {}", disk.name().to_string_lossy())
+                } else {
+                    error!("No uf2 disk found!")
                 }
             }
         }
