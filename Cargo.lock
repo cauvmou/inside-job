@@ -1155,6 +1155,7 @@ dependencies = [
  "pest_derive",
  "pollster",
  "prettytable",
+ "rayon",
  "reedline",
  "reqwest",
  "serde",

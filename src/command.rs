@@ -1,12 +1,28 @@
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use std::str::FromStr;
 use std::time::SystemTime;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use pest::iterators::{Pair, Pairs};
 use pollster::FutureExt;
+use rayon::prelude::*;
 use uuid::{Error, Uuid};
 use crate::parser::Rule;
+use crate::payload;
 use crate::session::SessionData;
 use crate::storage::SessionStore;
+
+static HELP_SESSION_STRING: &'static str = r#"session ( show | sh )
+session ( <alias> | <uuid> ) ( show | sh )
+session ( <alias> | <uuid> ) ( alias | > ) <alias>
+session ( <alias> | <uuid> ) ( open | op | . )
+session ( <alias> | <uuid> ) ( forget | x )"#;
+
+static HELP_DUCKY_STRING: &'static str = r#"ducky flash <server_address>"#;
+
+static HELP_STRING: &'static str = r#"( help | ? )
+( help | ? ) session
+( exit | quit | q )"#;
 
 #[derive(Debug)]
 pub enum Command {
@@ -17,14 +33,16 @@ pub enum Command {
     },
     SessionOpen(u128),
     SessionRemove(u128),
-    FlashFirmware(Option<String>),
+    FlashFirmware(String),
     Help(HelpCommand),
+    Quit,
 }
 
 #[derive(Debug)]
 pub enum HelpCommand {
     All,
     Session,
+    Ducky,
 }
 
 #[derive(Debug, Clone)]
@@ -61,8 +79,7 @@ impl Command {
                 }
             }
             [Token { rule: Rule::ducky_command, .. }, other @ ..] => match other {
-                [Token { rule: Rule::ducky_op_flash, .. }, Token { rule: Rule::EOI, .. }] => Ok(Self::FlashFirmware(None)),
-                [Token { rule: Rule::ducky_op_flash, .. }, Token { rule: Rule::firmware_url, value}, Token { rule: Rule::EOI, .. }] => Ok(Self::FlashFirmware(Some(value.to_string()))),
+                [Token { rule: Rule::ducky_op_flash, .. }, Token { rule: Rule::server_addr, value}, Token { rule: Rule::EOI, .. }] => Ok(Self::FlashFirmware(value.to_string())),
                 _ => Err("Unimplemented command!".to_string())
             }
             [Token { rule: Rule::help_command, .. }, Token { rule: Rule::EOI, .. }] => {
@@ -70,6 +87,12 @@ impl Command {
             }
             [Token { rule: Rule::help_command, .. }, Token { rule: Rule::help_op_session, .. }, Token { rule: Rule::EOI, .. }] => {
                 Ok(Self::Help(HelpCommand::Session))
+            }
+            [Token { rule: Rule::help_command, .. }, Token { rule: Rule::help_op_ducky, .. }, Token { rule: Rule::EOI, .. }] => {
+                Ok(Self::Help(HelpCommand::Ducky))
+            }
+            [Token { rule: Rule::exit_command, .. }, Token { rule: Rule::EOI, .. }] => {
+                Ok(Self::Quit)
             }
             _ => Err("Unimplemented command!".to_string())
         }
@@ -91,7 +114,7 @@ impl Command {
         }
     }
 
-    pub async fn execute(self, session_store: &mut SessionStore, alias_store: &mut HashMap<String, u128>, active_session: &mut Option<u128>) -> Result<(), String> {
+    pub async fn execute(self, session_store: &mut SessionStore, alias_store: &mut HashMap<String, u128>, active_session: &mut Option<u128>) -> Result<bool, String> {
         use prettytable as pt;
         debug!("EXECUTING: {:?}", self);
         match self {
@@ -154,11 +177,20 @@ impl Command {
             }
             Command::Help(command) => {
                 match command {
-                    HelpCommand::All => {}
-                    HelpCommand::Session => {}
+                    HelpCommand::All => {
+                        println!("{HELP_SESSION_STRING}");
+                        println!("{HELP_DUCKY_STRING}");
+                        println!("{HELP_STRING}");
+                    }
+                    HelpCommand::Session => {
+                        println!("{HELP_SESSION_STRING}");
+                    }
+                    HelpCommand::Ducky => {
+                        println!("{HELP_DUCKY_STRING}");
+                    }
                 }
             }
-            Command::FlashFirmware(url) => {
+            Command::FlashFirmware(address) => {
                 let disks = sysinfo::Disks::new_with_refreshed_list();
                 let disks = disks.into_iter()
                     .filter(|disk| disk.is_removable())
@@ -171,32 +203,25 @@ impl Command {
                             .output()
                             .expect("failed to start process!");
                         let label = std::str::from_utf8(&output.stdout).unwrap().trim().replace("/dev/disk/by-label/", "");
-                        label == "RPI-RP2"
+                        label == "CIRCUITPY"
                     }).collect::<Vec<_>>();
                 if disks.is_empty() {
                     return Err("No disk to flash found, searched for disk label: \"RPI-RP2\"!".to_string())
                 } else {
                     info!("Flashing {} disk(s): {}", disks.len(), disks.iter().map(|disk| disk.name().to_string_lossy()).collect::<Vec<_>>().join(", "));
                 }
-                let firmware = if let Some(url) = url {
-                    info!("Using custom firmware: {url}");
-                    reqwest::get(url).await.map_err(|err| err.to_string())?.bytes().await.map_err(|err| err.to_string())?
-                } else {
-                    let latest_url_github = reqwest::get("https://github.com/adafruit/circuitpython/releases/latest").await.map_err(|err| err.to_string())?.url().to_string();
-                    let latest_version = latest_url_github.replace("https://github.com/adafruit/circuitpython/releases/tag/", "");
-                    info!("Using latest version {latest_version} of circuit python for rp-pico");
-                    let latest_url = format!("https://downloads.circuitpython.org/bin/raspberry_pi_pico/en_US/adafruit-circuitpython-raspberry_pi_pico-en_US-{latest_version}.uf2");
-                    reqwest::get(latest_url).await.map_err(|err| err.to_string())?.bytes().await.map_err(|err| err.to_string())?
-                };
-                info!("Copying {} bytes to disk", firmware.len());
-                for disk in disks {
-                    let path = disk.mount_point().join("firmware.uf2");
-                    info!("Copying to {}", path.to_string_lossy());
-                    std::fs::write(path, firmware.clone()).map_err(|err| err.to_string())?;
-                }
-                info!("Successfully flashed devices!")
+                let addr = Ipv4Addr::from_str(address.as_str()).map_err(|err| err.to_string())?;
+                disks.par_iter().for_each(|disk| {
+                    match payload::flash_disk(disk, addr, "4132") {
+                        Ok(()) => info!("Sucessfully flashed disk {}", disk.name().to_string_lossy()),
+                        Err(err) => warn!("Couldn't flash disk {}: {err}", disk.name().to_string_lossy())
+                    }
+                })
+            }
+            Command::Quit => {
+                return Ok(true);
             }
         }
-        Ok(())
+        Ok(false)
     }
 }

@@ -2,9 +2,11 @@ mod session;
 mod storage;
 mod web;
 mod command;
+mod payload;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::process::exit;
 use std::sync::{Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::AtomicBool;
 use std::thread;
@@ -182,8 +184,14 @@ async fn main() -> std::io::Result<()> {
                             };
 
                             if let Ok(mut session_store) = session_store.write() {
-                                if let Err(err) = command.execute(&mut session_store, &mut alias_store, &mut active_session).await {
-                                    error!("{err}");
+                                match command.execute(&mut session_store, &mut alias_store, &mut active_session).await {
+                                    Ok(should_quit) if should_quit => {
+                                        break
+                                    }
+                                    Err(err) => {
+                                        error!("{err}");
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
