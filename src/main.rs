@@ -1,30 +1,25 @@
+mod command;
+mod payload;
 mod session;
 mod storage;
 mod web;
-mod command;
-mod payload;
 
+use crate::parser::Rule;
+use crate::storage::{LockState, SessionStore};
+use clap::Parser as ClapParser;
+use colored::Colorize;
+use log::{error, info, Level, Log, Metadata, Record};
+use pest::error::InputLocation;
+use pest::Parser;
+use pollster::FutureExt;
+use reedline::Color;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::process::exit;
-use std::sync::{Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::thread::spawn;
 use std::time::Duration;
-use actix_web::rt::signal;
-use actix_web::rt::signal::ctrl_c;
-use actix_web::rt::time::sleep;
-use clap::Parser as ClapParser;
-use pest::Parser;
-use log::{error, info, trace, warn, Level, Log, Metadata, Record};
-use pest::error::{Error, InputLocation};
 use uuid::Uuid;
-use crate::parser::Rule;
-use crate::storage::{LockState, SessionStore};
-use colored::Colorize;
-use pollster::FutureExt;
-use reedline::Color;
 
 static LOGO: &'static str = "
             ┌───┐
@@ -81,7 +76,9 @@ impl Log for ExternalPrinterLogger {
     }
 
     fn log(&self, record: &Record) {
-        self.0.print(format!("{}", record.args()).to_string()).unwrap();
+        self.0
+            .print(format!("{}", record.args()).to_string())
+            .unwrap();
     }
 
     fn flush(&self) {}
@@ -114,8 +111,14 @@ async fn main() -> std::io::Result<()> {
                 message,
             ))
         })
-        .chain(fern::Dispatch::new().filter(|metadata| metadata.target().starts_with("insidejob")).level(args.loglevel).chain(logger))
-        .apply().expect("logger initialization failed");
+        .chain(
+            fern::Dispatch::new()
+                .filter(|metadata| metadata.target().starts_with("insidejob"))
+                .level(args.loglevel)
+                .chain(logger),
+        )
+        .apply()
+        .expect("logger initialization failed");
 
     // create store
     let session_store = Arc::new(RwLock::new(SessionStore::default()));
@@ -126,11 +129,13 @@ async fn main() -> std::io::Result<()> {
 
     // cli
     let server_handle = web::run(session_store.clone()).await?;
-    let mut line_editor = reedline::Reedline::create().with_ansi_colors(true).with_external_printer(printer);
+    let mut line_editor = reedline::Reedline::create()
+        .with_ansi_colors(true)
+        .with_external_printer(printer);
     loop {
         let prompt: Box<dyn reedline::Prompt> = match active_session {
             Some(uuid) => Box::new(SessionPrompt(Uuid::from_u128(uuid))),
-            None => Box::new(ShellPrompt)
+            None => Box::new(ShellPrompt),
         };
 
         let sig = line_editor.read_line(prompt.as_ref());
@@ -148,14 +153,18 @@ async fn main() -> std::io::Result<()> {
                     }
                     let result = if let Ok(mut session_store) = session_store.write() {
                         session_store.start_command(uuid, buffer).ok()
-                    } else { None };
+                    } else {
+                        None
+                    };
                     if let Some(()) = result {
                         let session_store = session_store.clone();
                         spawn(move || {
                             loop {
                                 thread::sleep(Duration::from_millis(10));
                                 if let Ok(session_store) = session_store.read() {
-                                    if let Some(Some(LockState::ToReceive(output))) = session_store.session_lock.get(&uuid) {
+                                    if let Some(Some(LockState::ToReceive(output))) =
+                                        session_store.session_lock.get(&uuid)
+                                    {
                                         info!("{}: {output}", Uuid::from_u128(uuid));
                                         break;
                                     }
@@ -172,7 +181,11 @@ async fn main() -> std::io::Result<()> {
                     match parser::Parser::parse(Rule::command, buffer.as_str()) {
                         Ok(res) => {
                             let command = if let Ok(session_store) = session_store.read() {
-                                match command::Command::from_pairs(res, &session_store, &alias_store) {
+                                match command::Command::from_pairs(
+                                    res,
+                                    &session_store,
+                                    &alias_store,
+                                ) {
                                     Ok(command) => command,
                                     Err(err) => {
                                         error!("{err}");
@@ -180,14 +193,19 @@ async fn main() -> std::io::Result<()> {
                                     }
                                 }
                             } else {
-                                continue
+                                continue;
                             };
 
                             if let Ok(mut session_store) = session_store.write() {
-                                match command.execute(&mut session_store, &mut alias_store, &mut active_session).await {
-                                    Ok(should_quit) if should_quit => {
-                                        break
-                                    }
+                                match command
+                                    .execute(
+                                        &mut session_store,
+                                        &mut alias_store,
+                                        &mut active_session,
+                                    )
+                                    .await
+                                {
+                                    Ok(should_quit) if should_quit => break,
                                     Err(err) => {
                                         error!("{err}");
                                     }
@@ -203,7 +221,13 @@ async fn main() -> std::io::Result<()> {
                                     println!("      {:>amount$}^", "", amount = start)
                                 }
                                 InputLocation::Span((start, end)) => {
-                                    println!("      {:>amount$}{:>count$}", "", "^", amount = start, count = (end - start))
+                                    println!(
+                                        "      {:>amount$}{:>count$}",
+                                        "",
+                                        "^",
+                                        amount = start,
+                                        count = (end - start)
+                                    )
                                 }
                             }
                         }
@@ -238,7 +262,7 @@ impl reedline::Prompt for ShellPrompt {
     fn render_prompt_indicator(&self, prompt_mode: reedline::PromptEditMode) -> Cow<str> {
         match prompt_mode {
             reedline::PromptEditMode::Default | reedline::PromptEditMode::Emacs => ": ".into(),
-            _ => "> ".into()
+            _ => "> ".into(),
         }
     }
 
@@ -246,15 +270,15 @@ impl reedline::Prompt for ShellPrompt {
         ">>> ".to_owned().into()
     }
 
-    fn render_prompt_history_search_indicator(&self, history_search: reedline::PromptHistorySearch) -> Cow<str> {
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: reedline::PromptHistorySearch,
+    ) -> Cow<str> {
         let prefix = match history_search.status {
             reedline::PromptHistorySearchStatus::Passing => "",
             reedline::PromptHistorySearchStatus::Failing => "failing ",
         };
-        format!(
-            "({}reverse-search: {}) ",
-            prefix, history_search.term
-        ).into()
+        format!("({}reverse-search: {}) ", prefix, history_search.term).into()
     }
 
     fn get_prompt_color(&self) -> Color {
@@ -280,7 +304,7 @@ impl reedline::Prompt for SessionPrompt {
     fn render_prompt_indicator(&self, prompt_mode: reedline::PromptEditMode) -> Cow<str> {
         match prompt_mode {
             reedline::PromptEditMode::Default | reedline::PromptEditMode::Emacs => "$ ".into(),
-            _ => "> ".into()
+            _ => "> ".into(),
         }
     }
 
@@ -288,15 +312,15 @@ impl reedline::Prompt for SessionPrompt {
         ">>> ".to_owned().into()
     }
 
-    fn render_prompt_history_search_indicator(&self, history_search: reedline::PromptHistorySearch) -> Cow<str> {
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: reedline::PromptHistorySearch,
+    ) -> Cow<str> {
         let prefix = match history_search.status {
             reedline::PromptHistorySearchStatus::Passing => "",
             reedline::PromptHistorySearchStatus::Failing => "failing ",
         };
-        format!(
-            "({}reverse-search: {}) ",
-            prefix, history_search.term
-        ).into()
+        format!("({}reverse-search: {}) ", prefix, history_search.term).into()
     }
 
     fn get_prompt_color(&self) -> Color {
