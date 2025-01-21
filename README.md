@@ -12,12 +12,4 @@ Project in active development, not stable/polished.
 As mentioned before the project is based on Hoaxshell but includes some adjustments as to not be detected by Microsoft Defender.
 
 ## Villain
-Villain is a great tool and you should check it out, this is more or less a rewrite in Rust without the peer-to-peer connectivity that Villain has to offer, although that may be added in the future.
-
-## Goals
- - [x] Multi-session handling
- - [x] Basic CLI for managing sessions
- - [x] Windows payloads
- - [ ] Complex and rich CLI for best user experience
- - [ ] Linux payloads
- - [ ] Client interop (like Villain)
+Villain is a great tool and you should check it out, this is more or less a rewrite in Rust without the peer-to-peer connectivity that Villain has to offer.
