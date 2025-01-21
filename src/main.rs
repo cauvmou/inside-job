@@ -1,162 +1,333 @@
-use std::{collections::HashMap, sync::{Mutex, Arc}, time::SystemTime, thread};
-use actix_web::{HttpServer, App, web::{self, Bytes}, Responder, get, post, HttpResponseBuilder, http::StatusCode, HttpRequest};
-use lazy_static::lazy_static;
-use openssl::ssl::{SslAcceptor, SslMethod, SslFiletype};
-use docopt::Docopt;
-use serde::Deserialize;
-use uuid::Uuid;
-use cli::Session;
-
-use crate::cli::State;
-mod cli;
+mod command;
 mod payload;
-lazy_static! {
-    static ref APPLICATION: Arc<Mutex<Application>> = Arc::new(Mutex::new(Application::default()));
-}
+mod session;
+mod storage;
+mod web;
 
-const USAGE: &'static str = "
-inside-job
+use crate::parser::Rule;
+use crate::storage::{LockState, SessionStore};
+use clap::Parser as ClapParser;
+use colored::Colorize;
+use log::{error, info, Level, Log, Metadata, Record};
+use pest::error::InputLocation;
+use pest::Parser;
+use pollster::FutureExt;
+use reedline::Color;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::thread;
+use std::thread::spawn;
+use std::time::Duration;
+use uuid::Uuid;
 
-Usage: 
-    inside-job [-a ADDRESS] [-p PORT]
-    inside-job [-a ADDRESS] [-p PORT] --key PATH --cert PATH
-    inside-job (-h | --help)
+static LOGO: &'static str = "
+            ┌───┐
+──┬── ┬┐  ┬ │   │ ──┬── ┬──┐  ┬───┐           ┬ ┌───┐ ┬──┐
+  │   │└┐ │ │   ┴   │   │  └┐ │               │ │   │ │  │
+  │   │ │ │ └───┐   │   │   │ ┼──┼   ───      │ │   │ ┼──┴┐
+  │   │ └┐│ ┬   │   │   │  ┌┘ │           ┬   │ │   │ │   │
+──┴── ┴  └┴ │   │ ──┴── ┴──┘  ┴───┘       └───┘ └───┘ ┴───┘
+            └───┘                           made by cauvmou
+                                         based on hoaxshell
 
-Options:
-    -h, --help                      Show this screen.
-    -a ADDRESS, --address ADDRESS   Define the address [default: 0.0.0.0].
-    -p PORT, --port PORT            Define the port for the web server [default: 8080].
-    --key PATH                      Add TLS key in PEM format.
-    --cert PATH                     Add TLS cert in PEM format.
 ";
 
-#[derive(Debug, Deserialize)]
-pub struct Option {
-    flag_address: String,
-    flag_port: usize,
-    flag_key: String,
-    flag_cert: String
+#[derive(clap::Parser, Debug, Clone)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value = "0.0.0.0")]
+    address: std::net::Ipv4Addr,
+    #[arg(short, long, default_value_t = 4132)]
+    port: u16,
+    #[arg(short, long, default_value_t = log::LevelFilter::Info)]
+    loglevel: log::LevelFilter,
+    #[arg(
+        short,
+        long,
+        value_name = "FILE",
+        requires = "cert",
+        help = "TLS key for HTTPS, must be PEM format."
+    )]
+    key: Option<std::path::PathBuf>,
+    #[arg(
+        short,
+        long,
+        value_name = "FILE",
+        requires = "key",
+        help = "TLS cert for HTTPS, must be PEM format."
+    )]
+    cert: Option<std::path::PathBuf>,
 }
 
-pub struct Application {
-    pub sessions: HashMap<Uuid, Session>,
-    pub secure: bool,
-    pub port: usize,
+mod parser {
+    use pest_derive::Parser;
+
+    #[derive(Parser)]
+    #[grammar = "grammar.pest"]
+    pub struct Parser;
 }
 
-impl Default for Application {
-    fn default() -> Self {
-        Self { sessions: HashMap::new(), secure: false, port: 8080 }
+pub struct ExternalPrinterLogger(reedline::ExternalPrinter<String>);
+
+impl Log for ExternalPrinterLogger {
+    fn enabled(&self, _: &Metadata) -> bool {
+        true
     }
+
+    fn log(&self, record: &Record) {
+        self.0
+            .print(format!("{}", record.args()).to_string())
+            .unwrap();
+    }
+
+    fn flush(&self) {}
 }
 
-#[get("/")]
-async fn index(req: HttpRequest) -> impl Responder {
-    if let Ok(mut data) = APPLICATION.lock() {
-        let uuid = Uuid::new_v4();
-        data.sessions.insert(uuid, Session::default());
-        println!("Established session [{}] from {}", uuid.to_string(), req.connection_info().peer_addr().unwrap());
-        return uuid.to_string()
+fn level_to_color(level: log::Level) -> colored::ColoredString {
+    match level {
+        Level::Error => level.to_string().red(),
+        Level::Warn => level.to_string().yellow(),
+        Level::Info => level.to_string().blue(),
+        Level::Debug => level.to_string().green(),
+        Level::Trace => level.to_string().purple(),
     }
-    return "".to_owned();
-}
-
-#[get("/{uuid}")]
-async fn cmd_input(path: web::Path<(String,)>, req: HttpRequest) -> impl Responder {
-    if let Ok(mut data) = APPLICATION.lock() {
-        if let Ok(uuid) = Uuid::parse_str(path.0.as_str()) {
-            if let Some(session) = data.sessions.get_mut(&uuid) {
-                session.last_interaction = SystemTime::now();
-                session.state = State::ALIVE;
-                if let Some(dir) = req.headers().get("x-Dir") {
-                    session.pwd = dir.to_str().expect("Failed to parse directory string.").to_string()
-                }
-                if let Some(user) = req.headers().get("x-User") {
-                    session.user = user.to_str().expect("Failed to parse user string.").to_string()
-                }
-                if session.current_input.1 {
-                    let command = session.current_input.0.to_string();
-                    session.input_history.push((command.to_string(), SystemTime::now()));
-                    session.current_input = ("".to_string(), false);
-                    return command
-                }
-            }
-        }
-    }
-    return "".to_owned()
-}
-
-#[post("/{uuid}")]
-async fn cmd_output(path: web::Path<(String,),>, bytes: Bytes, req: HttpRequest) -> impl Responder {
-    if let Ok(mut data) = APPLICATION.lock() {
-        if let Ok(uuid) = Uuid::parse_str(path.0.as_str()) {
-            if let Some(session) = data.sessions.get_mut(&uuid) {
-                if let Ok(body) = String::from_utf8(bytes.to_vec()) {
-                    println!("{body}");
-                    if let Some(dir) = req.headers().get("x-Dir") {
-                        session.pwd = dir.to_str().expect("Failed to parse directory string.").to_string()
-                    }
-                    if let Some(user) = req.headers().get("x-User") {
-                        session.user = user.to_str().expect("Failed to parse user string.").to_string()
-                    }
-                    session.output_history.push((body, SystemTime::now()));
-                    session.last_interaction = SystemTime::now();
-                    return HttpResponseBuilder::new(StatusCode::ACCEPTED)
-                }
-                return HttpResponseBuilder::new(StatusCode::BAD_REQUEST)
-            }       
-        }
-    }
-    return HttpResponseBuilder::new(StatusCode::NOT_FOUND)
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let args: Option = Docopt::new(USAGE)
-        .and_then(|d| d.deserialize())
-        .unwrap_or_else(|e| e.exit());
+    let args = Args::parse();
 
-    let secure = args.flag_cert.len() > 0 && args.flag_key.len() > 0;
-    if let Ok(mut app) = APPLICATION.lock() {
-        app.secure = secure;
-        app.port = args.flag_port;
-    }
-    
-    let mut server = HttpServer::new(|| {
-        App::new()
-        .service(index)
-        .service(cmd_input)
-        .service(cmd_output)
-    });
-    if secure {
-        let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
-        builder
-            .set_private_key_file(args.flag_key, SslFiletype::PEM)
-            .unwrap();
-        builder.set_certificate_chain_file(args.flag_cert).unwrap();
-        server = server.bind_openssl(format!("{}:{}", args.flag_address, args.flag_port), builder)?;
-    } else {
-        server = server.bind(format!("{}:{}", args.flag_address, args.flag_port))?;
-    }
-    let _handle_cli = thread::spawn(move || cli::cli());
-    let _handle_hearth_beat = thread::spawn(move || hearth_beat());
-    server
-    .run()
-    .await
-}
+    let printer = reedline::ExternalPrinter::new(u16::MAX as usize);
+    let logger: Box<dyn Log> = Box::new(ExternalPrinterLogger(printer.clone()));
 
-fn hearth_beat() {
+    // init logger
+    println!("{LOGO}");
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{}] {}",
+                level_to_color(record.level()),
+                message,
+            ))
+        })
+        .chain(
+            fern::Dispatch::new()
+                .filter(|metadata| metadata.target().starts_with("insidejob"))
+                .level(args.loglevel)
+                .chain(logger),
+        )
+        .apply()
+        .expect("logger initialization failed");
+
+    // create store
+    let session_store = Arc::new(RwLock::new(SessionStore::default()));
+    let mut alias_store: HashMap<String, u128> = HashMap::new();
+    let mut active_session: Option<u128> = None;
+
+    // start web
+
+    // cli
+    let server_handle = web::run(session_store.clone()).await?;
+    let mut line_editor = reedline::Reedline::create()
+        .with_ansi_colors(true)
+        .with_external_printer(printer);
     loop {
-        if let Ok(mut application) = APPLICATION.lock() {
-            for (_k, session) in application.sessions.iter_mut() {
-                if let Ok(duration) = SystemTime::now().duration_since(session.last_interaction) {
-                    if duration.as_secs() > 4 {
-                        session.state = State::DEAD
-                    } else if duration.as_secs() > 2 {
-                        session.state = State::UNKNOWN
+        let prompt: Box<dyn reedline::Prompt> = match active_session {
+            Some(uuid) => Box::new(SessionPrompt(Uuid::from_u128(uuid))),
+            None => Box::new(ShellPrompt),
+        };
+
+        let sig = line_editor.read_line(prompt.as_ref());
+
+        match sig {
+            Ok(reedline::Signal::Success(buffer)) => {
+                // TODO: REFACTOR
+                if buffer.is_empty() {
+                    continue;
+                }
+                if let Some(uuid) = active_session {
+                    if buffer.as_str() == "quit" {
+                        active_session = None;
+                        continue;
+                    }
+                    let result = if let Ok(mut session_store) = session_store.write() {
+                        session_store.start_command(uuid, buffer).ok()
+                    } else {
+                        None
+                    };
+                    if let Some(()) = result {
+                        let session_store = session_store.clone();
+                        spawn(move || {
+                            loop {
+                                thread::sleep(Duration::from_millis(10));
+                                if let Ok(session_store) = session_store.read() {
+                                    if let Some(Some(LockState::ToReceive(output))) =
+                                        session_store.session_lock.get(&uuid)
+                                    {
+                                        info!("{}: {output}", Uuid::from_u128(uuid));
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Ok(mut session_store) = session_store.write() {
+                                session_store.session_lock.insert(uuid, None);
+                            }
+                        });
+                    } else {
+                        error!("Still waiting on previous command!")
+                    }
+                } else {
+                    match parser::Parser::parse(Rule::command, buffer.as_str()) {
+                        Ok(res) => {
+                            let command = if let Ok(session_store) = session_store.read() {
+                                match command::Command::from_pairs(
+                                    res,
+                                    &session_store,
+                                    &alias_store,
+                                ) {
+                                    Ok(command) => command,
+                                    Err(err) => {
+                                        error!("{err}");
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                continue;
+                            };
+
+                            if let Ok(mut session_store) = session_store.write() {
+                                match command
+                                    .execute(
+                                        &mut session_store,
+                                        &mut alias_store,
+                                        &mut active_session,
+                                    )
+                                    .await
+                                {
+                                    Ok(should_quit) if should_quit => break,
+                                    Err(err) => {
+                                        error!("{err}");
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            println!("Unknown command or error at:");
+                            println!("   $> {buffer}");
+                            match err.location {
+                                InputLocation::Pos(start) => {
+                                    println!("      {:>amount$}^", "", amount = start)
+                                }
+                                InputLocation::Span((start, end)) => {
+                                    println!(
+                                        "      {:>amount$}{:>count$}",
+                                        "",
+                                        "^",
+                                        amount = start,
+                                        count = (end - start)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
+            Ok(reedline::Signal::CtrlD) | Ok(reedline::Signal::CtrlC) => {
+                info!("Stopping...");
+                server_handle.stop(false).await;
+                break;
+            }
+            other => {
+                info!("Unhandled {:?}", other);
+            }
         }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct ShellPrompt;
+
+impl reedline::Prompt for ShellPrompt {
+    fn render_prompt_left(&self) -> Cow<str> {
+        "[ inside-job ]".to_owned().into()
+    }
+
+    fn render_prompt_right(&self) -> Cow<str> {
+        "".to_owned().into()
+    }
+
+    fn render_prompt_indicator(&self, prompt_mode: reedline::PromptEditMode) -> Cow<str> {
+        match prompt_mode {
+            reedline::PromptEditMode::Default | reedline::PromptEditMode::Emacs => ": ".into(),
+            _ => "> ".into(),
+        }
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<str> {
+        ">>> ".to_owned().into()
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: reedline::PromptHistorySearch,
+    ) -> Cow<str> {
+        let prefix = match history_search.status {
+            reedline::PromptHistorySearchStatus::Passing => "",
+            reedline::PromptHistorySearchStatus::Failing => "failing ",
+        };
+        format!("({}reverse-search: {}) ", prefix, history_search.term).into()
+    }
+
+    fn get_prompt_color(&self) -> Color {
+        Color::Green
+    }
+
+    fn get_indicator_color(&self) -> Color {
+        Color::Green
+    }
+}
+
+struct SessionPrompt(uuid::Uuid);
+
+impl reedline::Prompt for SessionPrompt {
+    fn render_prompt_left(&self) -> Cow<str> {
+        format!("[ {} ]", self.0).into()
+    }
+
+    fn render_prompt_right(&self) -> Cow<str> {
+        "".to_owned().into()
+    }
+
+    fn render_prompt_indicator(&self, prompt_mode: reedline::PromptEditMode) -> Cow<str> {
+        match prompt_mode {
+            reedline::PromptEditMode::Default | reedline::PromptEditMode::Emacs => "$ ".into(),
+            _ => "> ".into(),
+        }
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<str> {
+        ">>> ".to_owned().into()
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: reedline::PromptHistorySearch,
+    ) -> Cow<str> {
+        let prefix = match history_search.status {
+            reedline::PromptHistorySearchStatus::Passing => "",
+            reedline::PromptHistorySearchStatus::Failing => "failing ",
+        };
+        format!("({}reverse-search: {}) ", prefix, history_search.term).into()
+    }
+
+    fn get_prompt_color(&self) -> Color {
+        Color::Cyan
+    }
+
+    fn get_indicator_color(&self) -> Color {
+        Color::Cyan
     }
 }

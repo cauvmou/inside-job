@@ -1,0 +1,29 @@
+WHITESPACE = _{ " " | "\t" }
+
+uuid = @{uuid_char{8} ~ "-" ~ uuid_char{4} ~ "-" ~ uuid_char{4} ~ "-" ~ uuid_char{4} ~ "-" ~ uuid_char{12}}
+    uuid_char = _{(ASCII_ALPHA_LOWER | ASCII_DIGIT)}
+
+alias = @{"$" ~ alias_char+}
+    alias_char = @{ASCII_ALPHA | "-" | "_"}
+
+session_command = {"session" ~ (session_op_show | session_op)}
+    object = @{uuid | alias}
+    session_op = _{object ~ (session_op_show | session_op_alias | session_op_open | session_op_remove)}
+    session_op_show = {"show" | "sh"}
+    session_op_alias = {("alias" | ">") ~ alias}
+    session_op_open = {"open" | "op" | "."}
+    session_op_remove = {"forget" | "x"}
+
+ducky_command = {"ducky" ~ ducky_op}
+    server_addr = @{(ASCII_DIGIT)+ ~ "." ~ (ASCII_DIGIT)+ ~ "." ~ (ASCII_DIGIT)+ ~ "." ~ (ASCII_DIGIT)+}
+    ducky_op = _{ducky_op_flash}
+    ducky_op_flash = {"flash" ~ server_addr}
+
+help_command = {("help" | "?") ~ (help_op)?}
+    help_op = _{help_op_session | help_op_ducky}
+    help_op_session = @{"session"}
+    help_op_ducky = @{"ducky"}
+
+exit_command = {"quit" | "q" | "exit"}
+
+command = _{ SOI ~ (exit_command | session_command | ducky_command | help_command) ~ EOI }
