@@ -20,6 +20,7 @@ static HELP_DUCKY_STRING: &'static str = r#"ducky flash <server_address>"#;
 
 static HELP_STRING: &'static str = r#"( help | ? )
 ( help | ? ) session
+( help | ? ) ducky
 ( exit | quit | q )"#;
 
 #[derive(Debug)]
